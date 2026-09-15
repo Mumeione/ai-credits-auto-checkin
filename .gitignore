@@ -1,0 +1,20 @@
+# 凭据与签名（敏感）
+checkin_auth.json
+keystore.properties
+**/keystore/
+*.jks
+*.keystore
+
+# 构建产物
+build/
+.gradle/
+local.properties
+
+# 本地备份与发布产物（release 资产通过 GitHub Release 附件发布）
+README_local.md
+release/
+
+# IDE
+.idea/
+*.iml
+.DS_Store
