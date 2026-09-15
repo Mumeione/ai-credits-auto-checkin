@@ -19,8 +19,10 @@ android {
         applicationId = "com.example.checkin"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        // versionCode 必须严格递增，否则覆盖安装会报「应用未安装」
+        // （v1.0.0 已发布为 versionCode 1；v1.1.x 使用 2）
+        versionCode = 2
+        versionName = "1.1.1"
     }
 
     signingConfigs {
@@ -36,8 +38,41 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // release 开启 R8：删除无用类/方法/字段 + 资源压缩，保留规则见 proguard-rules.pro
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
             signingConfig = signingConfigs.findByName("release")
+        }
+        debug {
+            isMinifyEnabled = false
+        }
+    }
+
+    // 去掉 APK 里的 Play 依赖元数据块
+    dependenciesInfo {
+        includeInApk = false
+        includeInBundle = false
+    }
+
+    // 剔除依赖带进来的许可证 / 元数据等无用文件
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/*.version",
+                "META-INF/*.kotlin_module",
+                "META-INF/*.md",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "DebugProbesKt.bin",
+                "kotlin-tooling-metadata.json",
+            )
         }
     }
 
