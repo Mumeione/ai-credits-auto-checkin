@@ -25,22 +25,22 @@ import androidx.activity.ComponentActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
-import androidx.work.Constraints
-import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequest
-import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
+import com.example.checkin.data.ImportOutcome
 import com.example.checkin.data.TokenStore
 import com.example.checkin.network.ApiClient
+import com.example.checkin.worker.DailySchedule
 import com.example.checkin.worker.TraeApi
+import com.example.checkin.worker.WorkBuddyApi
+import com.example.checkin.worker.TraeStatus
 import com.example.checkin.worker.TraeWorker
 import com.example.checkin.worker.WorkBuddyWorker
-import com.example.checkin.worker.consecutiveCheckinDays
+import com.example.checkin.worker.boolOrNull
+import com.example.checkin.worker.intOrNull
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
-import java.util.concurrent.TimeUnit
 
 /**
  * 单页 UI：顶部固定「标题 + 操作按钮 + 平台分段控件 + 状态条」，中部滚动账号列表与导入区。
@@ -107,7 +107,7 @@ class MainActivity : ComponentActivity() {
             )
         }
 
-        registerPeriodic()
+        registerDaily()
         setContentView(buildUi())
         updateTabs()
         refreshAccountLists()
@@ -581,35 +581,36 @@ class MainActivity : ComponentActivity() {
             try {
                 val json = JSONObject(text)
                 val store = TokenStore(applicationContext)
-                val added = mutableListOf<String>()
+                val results = mutableListOf<String>()
                 runBlocking {
-                    // 兼容 extract_tokens.py 的扁平格式；两平台字段都有时各追加一个账号
+                    // 兼容 extract_tokens.py 的扁平格式；两平台字段都有时各处理一个账号
                     if (json.has("trae_access")) {
-                        val name = store.addTraeAccount(
+                        val r = store.addTraeAccount(
                             json.optString("trae_access"),
                             json.optString("trae_refresh"),
                             json.optString("trae_device"),
                         )
-                        added.add("Trae·$name")
+                        results.add("${outcomeLabel(r.outcome)} Trae·${r.name}")
                     }
                     if (json.has("wb_token")) {
-                        val name = store.addWbAccount(
+                        val r = store.addWbAccount(
                             json.optString("wb_token"),
                             json.optString("wb_domain"),
+                            json.optString("wb_refresh"),
                         )
-                        added.add("WorkBuddy·$name")
+                        results.add("${outcomeLabel(r.outcome)} WorkBuddy·${r.name}")
                     }
                 }
                 runOnUiThread {
-                    if (added.isEmpty()) {
+                    if (results.isEmpty()) {
                         setStatus("JSON 中没有 trae_access / wb_token 字段", Tone.ERROR)
                     } else {
                         tokenInput.setText("")
                         toggleImport()  // 导入成功后收起
                         setStatus(
-                            "已添加：${added.joinToString("、")}（相同 Token 会覆盖更新）",
+                            results.joinToString("、") + "（同一账号自动覆盖更新，编号不变）",
                             Tone.OK,
-                            autoHideMs = 4000,
+                            autoHideMs = 5000,
                         )
                         refreshAccountLists()
                     }
@@ -620,10 +621,24 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
+    private fun outcomeLabel(outcome: ImportOutcome): String = when (outcome) {
+        ImportOutcome.ADDED -> "已添加"
+        ImportOutcome.UPDATED -> "已更新"
+    }
+
     // ---------- 手动操作 ----------
 
     private fun runOnce(name: String, worker: Class<out androidx.work.ListenableWorker>) {
-        val request = OneTimeWorkRequest.Builder(worker).build()
+        // 手动签到不加网络/电量约束（用户点了就是要现在试），并打上 manual 标记：
+        // Worker 会把每个账号的结果（含失败）当场通知，不再进退避重试——
+        // 否则限流等可重试失败要等 5→10 分钟的退避轮次才有通知，手动时体验很差
+        val request = OneTimeWorkRequest.Builder(worker)
+            .setInputData(
+                androidx.work.Data.Builder()
+                    .putBoolean(DailySchedule.KEY_MANUAL, true)
+                    .build()
+            )
+            .build()
         WorkManager.getInstance(this).enqueueUniqueWork(name, ExistingWorkPolicy.REPLACE, request)
         setStatus("已提交签到任务，结果稍后通过通知播报", Tone.INFO, autoHideMs = 4000)
     }
@@ -643,7 +658,7 @@ class MainActivity : ComponentActivity() {
                         try {
                             var api = TraeApi(acc.access, acc.device)
                             var status = api.status()
-                            if (status == null) {
+                            if (status is TraeStatus.AuthFailed) {
                                 val renewed = TraeApi.exchangeToken(acc.refresh)
                                 if (renewed != null) {
                                     store.updateTraeAccount(
@@ -653,15 +668,28 @@ class MainActivity : ComponentActivity() {
                                     status = api.status()
                                 }
                             }
-                            if (status == null) {
-                                lines.add("Trae·${acc.name}：Token 失效，请重新提取")
-                                return@forEach
+                            when (status) {
+                                is TraeStatus.AuthFailed -> lines.add(
+                                    "Trae·${acc.name}：Token 失效，请在电脑上重跑 run.cmd 重新提取"
+                                )
+
+                                is TraeStatus.Failed -> lines.add(
+                                    "Trae·${acc.name}：查询失败 " +
+                                        status.message.ifBlank { "code=${status.code}" }
+                                )
+
+                                is TraeStatus.Ok -> {
+                                    val json = status.json
+                                    val usage = api.entUsage()
+                                    val sb = StringBuilder(
+                                        "Trae·${acc.name}：今日已签 ${json.optBoolean("checked_in")}"
+                                    )
+                                    json.optInt("credits", -1).takeIf { it >= 0 }
+                                        ?.let { sb.append("，今日 +$it") }
+                                    usage?.let { sb.append("\n    额度已用 ${it.first} / ${it.second}") }
+                                    lines.add(sb.toString())
+                                }
                             }
-                            val usage = api.entUsage()
-                            val sb = StringBuilder("Trae·${acc.name}：今日已签 ${status.optBoolean("checked_in")}")
-                            status.optInt("credits", -1).takeIf { it >= 0 }?.let { sb.append("，今日 +$it") }
-                            usage?.let { sb.append("\n    额度已用 ${it.first} / ${it.second}") }
-                            lines.add(sb.toString())
                         } catch (e: Exception) {
                             lines.add("Trae·${acc.name}：查询失败 ${e.message}")
                         }
@@ -672,20 +700,66 @@ class MainActivity : ComponentActivity() {
                     wbAccounts.forEach { acc ->
                         if (acc.token.isBlank() || acc.domain.isBlank()) return@forEach
                         try {
-                            val body = ApiClient.post(
-                                "${acc.domain}/v2/billing/meter/checkin-activity-status",
-                                "{}", "Bearer ${acc.token}",
+                            // 鉴权失败先自动续期再重试一次（判定口径与定时签到共用
+                            // WorkBuddyApi.isAuthFailure 的同一份实现），别急着报「Token 失效」
+                            var current = acc
+                            var resp = ApiClient.postRaw(
+                                "${current.domain}/v2/billing/meter/checkin-activity-status",
+                                "{}", "Bearer ${current.token}",
                             )
-                            val json = JSONObject(body)
-                            val data = json.optJSONObject("data")
-                            if (json.optInt("code") == 0 && data != null) {
+                            var json = WorkBuddyApi.parseJson(resp.body)
+                            var auth = WorkBuddyApi.isAuthFailure(resp, json)
+                            if (auth) {
+                                val renewed = WorkBuddyApi.refreshToken(current.refresh)
+                                if (renewed != null) {
+                                    current = current.copy(token = renewed.first, refresh = renewed.second)
+                                    store.updateWbAccount(current)
+                                    resp = ApiClient.postRaw(
+                                        "${current.domain}/v2/billing/meter/checkin-activity-status",
+                                        "{}", "Bearer ${current.token}",
+                                    )
+                                    json = WorkBuddyApi.parseJson(resp.body)
+                                    // 续期后仍判鉴权失败，才算真的「Token 失效」；
+                                    // 续期本身失败（返回 null）时保持 auth，同样属实
+                                    auth = WorkBuddyApi.isAuthFailure(resp, json)
+                                }
+                            }
+                            val wbJson = json
+                            val data = wbJson?.optJSONObject("data")
+                            // 判定顺序刻意是「先鉴权、再解析」：HTTP 401 且响应体为空时
+                            // json 是 null，若先看 json 就会报成「响应不是合法 JSON」，
+                            // 把真正的 Token 失效说错。
+                            if (auth) {
                                 lines.add(
-                                    "WorkBuddy·${acc.name}：今日已签 ${data.optBoolean("today_checked_in")}" +
-                                        "，连续 ${consecutiveCheckinDays(data)} 天" +
-                                        "，今日 +${data.optInt("today_credit", 0)}"
+                                    "WorkBuddy·${current.name}：" +
+                                        (if (current.refresh.isBlank())
+                                            "Token 失效，且未导入 refreshToken（重跑 run.cmd 后重新粘贴即可启用自动续期）"
+                                        else "Token 失效，自动刷新被拒" +
+                                            "（code=${wbJson?.optInt("code") ?: resp.code}），" +
+                                            "请在电脑上重新运行 run.cmd 提取")
                                 )
+                            } else if (wbJson == null) {
+                                lines.add(
+                                    "WorkBuddy·${current.name}：查询失败 服务端响应不是合法 JSON" +
+                                        "（HTTP ${resp.code}）"
+                                )
+                            } else if (wbJson.optInt("code") == 0 && data != null) {
+                                val checkedToday = data.optBoolean("today_checked_in")
+                                // 这里**不再查成长中心**：它的 `streak.days` 是「连续登录 PC 端」
+                                // 的天数（2026-09-17 用户更正），当「连续签到」用是错的，已整体删除；
+                                // 签到侧只剩本期赛季累计 `streak_days`，见 [wbStatusLine]。
+                                lines.add(wbStatusLine(current.name, checkedToday, data))
                             } else {
-                                lines.add("WorkBuddy·${acc.name}：Token 失效或接口异常 (${json.optInt("code")})")
+                                // 非鉴权失败（活动已结束/未开始、限流、5xx…）：如实报服务端给的原因。
+                                // 以前这里一律说「Token 失效，自动刷新被拒」，可这些情况
+                                // 压根没触发续期——那样报是拿错误结论把用户往「重新提取」上推，
+                                // 与当初把 Trae 9074 当成 Token 失效是同一类毛病。
+                                lines.add(
+                                    "WorkBuddy·${current.name}：查询失败 " +
+                                        wbJson.optString("msg").ifBlank { wbJson.optString("message") }
+                                            .ifBlank { "服务端返回 code=${wbJson.optInt("code")}" } +
+                                        "（HTTP ${resp.code}）"
+                                )
                             }
                         } catch (e: Exception) {
                             lines.add("WorkBuddy·${acc.name}：查询失败 ${e.message}")
@@ -702,34 +776,72 @@ class MainActivity : ComponentActivity() {
         }.start()
     }
 
+    // ---------- 查询结果文案 ----------
+
+    /**
+     * 单账号「查询积分」的结果文案（换行分段由结果弹窗按 `\n` 渲染）。
+     *
+     * 服务端字段一律用 [intOrNull] / [boolOrNull] 的「有才显示」读法：
+     * 这些字段都是社区逆向出来的，缺失时宁可少显示一行，也不要拿默认值冒充真实值——
+     * 否则会把「服务端没返回这个字段」显示成「累计 0 积分」「今天不是连签奖励日」。
+     *
+     * ⚠️ 这里**不显示「连续 N 天」**：成长中心的 `streak.days` 是**连续登录 PC 端**的天数
+     * （2026-09-17 用户更正），拿它当连续签到是错的，那次调用已整体删除；
+     * 签到接口自己只有 `streak_days`（**本期赛季累计**，换期归零，是否断签清零未实测），
+     * 所以在下面如实标成「本期累计」，别包装成「连续」。
+     */
+    private fun wbStatusLine(
+        name: String,
+        checkedToday: Boolean,
+        data: JSONObject,
+    ): String {
+        val sb = StringBuilder("WorkBuddy·$name：今日已签 $checkedToday")
+        // today_credit 与 daily_credit 是同一件事的两个名字，服务端只会回其中一个
+        (data.intOrNull("today_credit") ?: data.intOrNull("daily_credit"))
+            ?.let { sb.append("，今日 +$it") }
+
+        val activity = data.optString("activity_name").ifBlank { "-" }
+        val serverStreak = data.intOrNull("streak_days")
+        sb.append(
+            if (serverStreak != null) "\n    服务端本期累计 $serverStreak 天（活动：$activity）"
+            else "\n    活动：$activity"
+        )
+
+        val extra = mutableListOf<String>()
+        // 实测（2026-09-17）total_credits=200 恰为 streak_days(2) × daily_credit(100)，
+        // 即它是**本期活动**口径、不是账号历史总积分。所以必须写明「本期」——
+        // 笼统写「累计」会像社区脚本那样，让人误以为这是账号的总资产。
+        data.intOrNull("total_credits")?.let { extra.add("本期累计 $it 积分") }
+        data.boolOrNull("is_streak_day")
+            ?.let { extra.add(if (it) "今天是连签奖励日" else "今天非连签奖励日") }
+        // 实测本期活动返回 0，语义是「本期没有下一档奖励日」而不是「第 0 天」，故只在 > 0 时提示
+        data.intOrNull("next_streak_day")?.takeIf { it > 0 }
+            ?.let { extra.add("下次奖励在第 $it 天") }
+        if (extra.isNotEmpty()) sb.append("\n    ").append(extra.joinToString(" · "))
+
+        return sb.toString()
+    }
+
     // ---------- 定时任务 ----------
 
-    private fun registerPeriodic() {
-        val constraints = Constraints.Builder()
-            .setRequiredNetworkType(NetworkType.CONNECTED)
-            .setRequiresBatteryNotLow(true)
-            .build()
-
-        // Trae 签到：每天执行一次（Worker 内部遍历全部账号）
-        val traeRequest = PeriodicWorkRequestBuilder<TraeWorker>(
-            1, TimeUnit.DAYS, 30, TimeUnit.MINUTES
-        ).setConstraints(constraints).build()
-
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "trae_checkin",
-            ExistingPeriodicWorkPolicy.KEEP,
-            traeRequest,
-        )
-
-        // WorkBuddy 签到：每天执行一次（Worker 内部遍历全部账号）
-        val wbRequest = PeriodicWorkRequestBuilder<WorkBuddyWorker>(
-            1, TimeUnit.DAYS, 30, TimeUnit.MINUTES
-        ).setConstraints(constraints).build()
-
-        WorkManager.getInstance(this).enqueueUniquePeriodicWork(
-            "workbuddy_checkin",
-            ExistingPeriodicWorkPolicy.KEEP,
-            wbRequest,
-        )
+    /**
+     * 每日签到排程：东八区 08:00 起、08:50 前随机错峰执行（详见 [DailySchedule]）。
+     *
+     * 顺带做两件事：
+     * 1. 取消 1.2.0 之前注册的两个周期任务，否则新旧两套排程会同时跑；
+     * 2. `ensureScheduled` 里带「兜底补签」——只在当天落点（最晚 08:50）已过、且今天
+     *    **一次都没跑过**时补跑一次；今天跑过（哪怕失败）就不再补，避免每次开 App
+     *    都重发一整条重试链。
+     *
+     * 整体放到后台线程：enqueue 与 `alreadyHandled` 里的 `getWorkInfos...get()`
+     * 都是阻塞的数据库操作，在 onCreate（主线程）直接调会触发 StrictMode / ANR 风险。
+     * 开启 App 后排程晚几毫秒落地没有影响，排程本身是幂等的。
+     */
+    private fun registerDaily() {
+        Thread {
+            DailySchedule.cancelLegacyPeriodic(this)
+            DailySchedule.ensureScheduled(this, DailySchedule.WORK_TRAE, TraeWorker::class.java)
+            DailySchedule.ensureScheduled(this, DailySchedule.WORK_WB, WorkBuddyWorker::class.java)
+        }.start()
     }
 }

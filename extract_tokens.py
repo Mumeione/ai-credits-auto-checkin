@@ -11,6 +11,9 @@ HEADER = bytes([116, 99, 5, 16, 0, 0])
 LEFT_SECRET = bytes([82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227, 57, 130, 155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50, 166, 194, 35, 61, 238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36, 178, 118, 91, 162, 73, 109, 139, 209, 37])
 RIGHT_SECRET = bytes([31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127, 169, 25, 181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174, 42, 245, 176, 200, 235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33, 12, 125])
 
+# 服务端认得的设备号来源：storage.json 里 iCubeAuthInfo://icube-dc:<16 位数字>
+DC_KEY_PREFIX = "iCubeAuthInfo://icube-dc:"
+
 try:
     from Crypto.Cipher import AES  # pycryptodome
 except ImportError:
@@ -50,17 +53,41 @@ def find_trae_storage() -> str:
     sys.exit("找不到 Trae storage.json，请确认已登录 Trae 桌面端")
 
 
+def trae_device_id(storage: dict) -> str:
+    """
+    取服务端认得的 Trae 设备号：**16 位纯数字的 Aha 设备号**。
+
+    为什么不能用 telemetry.devDeviceId：那是 UUID 格式的**旧**设备号。
+    本机 storage.json 里有 `has_device_id_updated_to_aha = true`，
+    说明客户端已经迁移到 Aha 设备号；而服务端按**注册指纹**校验 device id，
+    UUID 不被识别为已注册设备，会被当成陌生设备更严格限流
+    （签到接口表现为 9074「参与用户太多」）。
+    正确来源是 `iCubeAuthInfo://icube-dc:<16 位数字>` 这个 key 的后缀。
+    """
+    for key in storage:
+        if key.startswith(DC_KEY_PREFIX):
+            suffix = key[len(DC_KEY_PREFIX):]
+            if suffix.isdigit():
+                return suffix
+    # 兜底：未迁移到 Aha 的老客户端可能没有 dc key，退回 devDeviceId（UUID，可能被限流）
+    return storage.get("telemetry.devDeviceId", "")
+
+
 def extract_trae() -> dict:
     with open(find_trae_storage(), encoding="utf-8") as f:
         storage = json.load(f)
     auth = decrypt_trae(storage["iCubeAuthInfo://icube.cloudide"])
-    device_id = storage.get("telemetry.devDeviceId", "")
+    device_id = trae_device_id(storage)
     if not device_id:
-        sys.exit("storage.json 中缺少 telemetry.devDeviceId")
+        sys.exit("storage.json 中找不到可用设备号（icube-dc 或 telemetry.devDeviceId）")
     return {
         "trae_access": auth.get("token") or auth.get("accessToken", ""),
         "trae_refresh": auth.get("refreshToken", ""),
+        # 16 位纯数字设备号；App 的 x-device-id 直接用它
         "trae_device": device_id,
+        # 客户端指纹的另一半：App 目前只发 x-device-id，
+        # 这个值一并留档，供后续需要 X-Machine-Id 时使用（导入时会被忽略）
+        "trae_machine_id": storage.get("telemetry.machineId", ""),
         "trae_expired_at": auth.get("expiredAt", ""),
     }
 
@@ -78,6 +105,7 @@ def extract_workbuddy() -> dict:
     auth = info.get("auth", info)
     return {
         "wb_token": auth.get("accessToken", ""),
+        "wb_refresh": auth.get("refreshToken", ""),
         "wb_domain": "https://" + (auth.get("domain") or "copilot.tencent.com"),
     }
 
