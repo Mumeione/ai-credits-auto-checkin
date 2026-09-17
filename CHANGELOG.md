@@ -458,8 +458,5 @@
 
 [Unreleased]: https://github.com/Mumeione/ai-credits-auto-checkin/compare/v1.4.1...HEAD
 [1.4.1]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.4.1
-[1.4.0]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.4.0
-[1.3.0]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.3.0
-[1.2.0]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.2.0
 [1.1.1]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.1.1
 [1.0.0]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.0.0

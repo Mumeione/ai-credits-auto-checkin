@@ -299,19 +299,6 @@ WorkManager 负责「最终一定会执行」：App 被划掉、设备重启后�
 App 的处理：每轮只发 1 次签到请求，失败后每 **10 分钟**自动重试一轮、**最多 3 次**
 （约 20 分钟内跑完）即收手，并推一条通知提醒你**手动到客户端签到**。
 
-> **2026-09-17 实测记录**
-> - 服务端 `checkin_20260917` 奖励包的 `start_time` = **19:46:57**（奖励包的 `start_time`
->   就是那次签到发生的时刻）。这次**不是 App 干的**——用户确认当天安卓端已卸载、未运行，
->   是 **Trae 桌面客户端自动更新后自己签的**。
-> - 从客户端源码（`resources/app/out/main.js` 的 `fb()`）读到它真实的签到头集合：
->   `Authorization: Cloud-IDE-JWT` / `x-device-id` / `x-device-brand` / `x-device-type` /
->   `x-os-version` / `x-app-version`(= `product.json.appVersion`，本机 `3.3.102`)；
->   **不发** `X-User-Region`、**不发** `Trae/...` 这种自造 UA。
->   我们已修正设备号取法与 `x-app-version`（此前误用了 VS Code 内核版本 `1.107.1`）。
-> - **21:00 实测签成**：换成另一台电脑的真实注册设备号后，`claim` 返回 `code=0 success`、
->   复核 `checked_in` 变为 `true` —— **证明本项目的请求格式有效**，`9074` 的症结确实在设备号。
->   顺带说明：我们多发的 `X-User-Region` 与自造 UA **并未导致失败**，所以暂不对齐这两项。
-
 **Q：多个账号能同时签到吗？**
 **同一台设备每天只有第一个账号能签成**，这是平台的设备级去重（返回 `9095`
 「当前设备今日已经签到，请明日再来哦～」，此时该账号自己的 `checked_in` 仍是 `false`，
@@ -383,8 +370,6 @@ WorkManager 的任务是「尽量」而非「精确」执行，会受系统省�
 
 仓库根目录已附带 `.gitignore`，覆盖上述敏感文件以及构建产物：
 
-````gitignore
-
 **推送前自检**（确认没有敏感文件被跟踪）：
 
 ```bash
@@ -403,8 +388,8 @@ App 自身的隐私行为：Token 只保存在应用私有存储中，仅用于�
 
 本项目的接口实现参考了以下社区项目，感谢作者们的付出：
 
-- [Trae-AutoCheckin](https://github.com/L0NE-6/Trae-AutoCheckin)（Trae 请求形态与抗 9074 的讨论；其中「换设备号解 9074」经本机实测不成立，见 CHANGELOG）
-- [WorkBuddy-Daily](https://github.com/L0NE-6/WorkBuddy-Daily)（WorkBuddy 插件接口续期与智能续期节奏）
+- [Trae-AutoCheckin](https://github.com/L0NE-6/Trae-AutoCheckin)
+- [WorkBuddy-Daily](https://github.com/L0NE-6/WorkBuddy-Daily)
 - [trae-check](https://github.com/inlayin/trae-check)
 - [traework2api](https://github.com/Sliverkiss/traework2api)
 - [trae-mate](https://github.com/luckymiaow/trae-mate)
