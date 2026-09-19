@@ -21,9 +21,9 @@ android {
         targetSdk = 35
         // versionCode 必须严格递增，否则覆盖安装会报「应用未安装」
         // （v1.0.0 已发布为 versionCode 1；v1.1.x 使用 2；v1.2.0 使用 3；
-        //   v1.3.0 使用 4；v1.4.0 使用 5；v1.4.1 使用 6）
-        versionCode = 6
-        versionName = "1.4.1"
+        //   v1.3.0 使用 4；v1.4.0 使用 5；v1.4.1 使用 6；v1.4.2 使用 7）
+        versionCode = 7
+        versionName = "1.4.2"
     }
 
     signingConfigs {

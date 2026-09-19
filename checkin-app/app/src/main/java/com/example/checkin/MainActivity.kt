@@ -37,7 +37,6 @@ import com.example.checkin.worker.WorkBuddyApi
 import com.example.checkin.worker.TraeStatus
 import com.example.checkin.worker.TraeWorker
 import com.example.checkin.worker.WorkBuddyWorker
-import com.example.checkin.worker.boolOrNull
 import com.example.checkin.worker.intOrNull
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -110,6 +109,13 @@ class MainActivity : ComponentActivity() {
         registerDaily()
         setContentView(buildUi())
         updateTabs()
+        refreshAccountLists()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 账号卡片的「最近一次结果」由 Worker 在后台写回（定时/手动签到都可能发生在
+        // 本页面停留期间或后台），回到前台时重读一次，避免卡片停留在旧状态。
         refreshAccountLists()
     }
 
@@ -464,13 +470,14 @@ class MainActivity : ComponentActivity() {
             background = shape(surface, 18)
             setPadding(dp(20), dp(18), dp(20), dp(16))
         }
-        card.addView(TextView(this).apply {
+        val titleView = TextView(this).apply {
             text = title
             textSize = 16f
             setTypeface(null, Typeface.BOLD)
             setTextColor(textMain)
             includeFontPadding = false
-        })
+        }
+        card.addView(titleView)
 
         val body = TextView(this).apply {
             text = lines.joinToString("\n\n").ifBlank { "（无结果）" }
@@ -484,7 +491,17 @@ class MainActivity : ComponentActivity() {
             View.MeasureSpec.makeMeasureSpec(cardWidth - dp(40), View.MeasureSpec.EXACTLY),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
         )
-        val maxBodyHeight = (metrics.heightPixels * 0.45f).toInt()
+        // 封顶算的是「弹窗整体」高度：量出标题/按钮/内边距的固定占位，把「整窗 ≤ 55% 屏」
+        // 折算成正文滚动区的上限。原先只封正文 45%，加上标题和按钮后整窗能顶到六成屏，
+        // 账号一多观感就是「弹窗没约束」（2026-09-18 用户反馈）。
+        titleView.measure(
+            View.MeasureSpec.makeMeasureSpec(cardWidth - dp(40), View.MeasureSpec.EXACTLY),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED)
+        )
+        val fixedHeight = dp(18 + 16) + titleView.measuredHeight +
+            dp(12) + dp(BTN_H_SUB + 16)
+        val maxBodyHeight = ((metrics.heightPixels * 0.55f).toInt() - fixedHeight)
+            .coerceAtLeast(dp(120))
         val scroll = ScrollView(this).apply {
             addView(body)
             isVerticalScrollBarEnabled = true
@@ -656,14 +673,14 @@ class MainActivity : ComponentActivity() {
                     traeAccounts.forEach { acc ->
                         if (acc.access.isBlank()) return@forEach
                         try {
+                            var current = acc
                             var api = TraeApi(acc.access, acc.device)
                             var status = api.status()
                             if (status is TraeStatus.AuthFailed) {
                                 val renewed = TraeApi.exchangeToken(acc.refresh)
                                 if (renewed != null) {
-                                    store.updateTraeAccount(
-                                        acc.copy(access = renewed.first, refresh = renewed.second)
-                                    )
+                                    current = acc.copy(access = renewed.first, refresh = renewed.second)
+                                    store.updateTraeAccount(current)
                                     api = TraeApi(renewed.first, acc.device)
                                     status = api.status()
                                 }
@@ -680,9 +697,19 @@ class MainActivity : ComponentActivity() {
 
                                 is TraeStatus.Ok -> {
                                     val json = status.json
+                                    val checkedIn = json.optBoolean("checked_in")
+                                    // 把查询到的签到状态同步写回账号卡片：
+                                    // 卡片只显示 Worker 写回的 lastResult，查询结果不同步过去的话，
+                                    // 「查询说已签、卡片还是旧的/尚未签到」会让人以为没签上（2026-09-18 反馈）。
+                                    // 查询失败不覆盖，保留 Worker 写下的最近一次真实结果。
+                                    store.updateTraeAccount(
+                                        current.copy(
+                                            lastResult = if (checkedIn) "今日已签到" else "今日未签到"
+                                        )
+                                    )
                                     val usage = api.entUsage()
                                     val sb = StringBuilder(
-                                        "Trae·${acc.name}：今日已签 ${json.optBoolean("checked_in")}"
+                                        "Trae·${acc.name}：今日已签 $checkedIn"
                                     )
                                     json.optInt("credits", -1).takeIf { it >= 0 }
                                         ?.let { sb.append("，今日 +$it") }
@@ -745,6 +772,12 @@ class MainActivity : ComponentActivity() {
                                 )
                             } else if (wbJson.optInt("code") == 0 && data != null) {
                                 val checkedToday = data.optBoolean("today_checked_in")
+                                // 与 Trae 侧同理：查询结果同步写回账号卡片（失败不覆盖，见上）
+                                store.updateWbAccount(
+                                    current.copy(
+                                        lastResult = if (checkedToday) "今日已签到" else "今日未签到"
+                                    )
+                                )
                                 // 这里**不再查成长中心**：它的 `streak.days` 是「连续登录 PC 端」
                                 // 的天数（2026-09-17 用户更正），当「连续签到」用是错的，已整体删除；
                                 // 签到侧只剩本期赛季累计 `streak_days`，见 [wbStatusLine]。
@@ -768,6 +801,9 @@ class MainActivity : ComponentActivity() {
                 }
                 runOnUiThread {
                     setStatus("")
+                    // 查询把各账号的 lastResult 同步过了，顺手刷新卡片，
+                    // 让「查询说已签」和「卡片显示」在同一个动作里对齐
+                    refreshAccountLists()
                     showResultDialog("查询结果", lines)
                 }
             } catch (e: Exception) {
@@ -781,14 +817,16 @@ class MainActivity : ComponentActivity() {
     /**
      * 单账号「查询积分」的结果文案（换行分段由结果弹窗按 `\n` 渲染）。
      *
-     * 服务端字段一律用 [intOrNull] / [boolOrNull] 的「有才显示」读法：
+     * 服务端字段一律用 [intOrNull] 的「有才显示」读法：
      * 这些字段都是社区逆向出来的，缺失时宁可少显示一行，也不要拿默认值冒充真实值——
-     * 否则会把「服务端没返回这个字段」显示成「累计 0 积分」「今天不是连签奖励日」。
+     * 否则会把「服务端没返回这个字段」显示成「累计 0 积分」。
      *
      * ⚠️ 这里**不显示「连续 N 天」**：成长中心的 `streak.days` 是**连续登录 PC 端**的天数
      * （2026-09-17 用户更正），拿它当连续签到是错的，那次调用已整体删除；
      * 签到接口自己只有 `streak_days`（**本期赛季累计**，换期归零，是否断签清零未实测），
      * 所以在下面如实标成「本期累计」，别包装成「连续」。
+     * 连签奖励日字段（`is_streak_day` / `next_streak_day`）也已删——2026-09-18 实测
+     * season 9 整期没配奖励日，留着一整期都不出现的字段只占文案。
      */
     private fun wbStatusLine(
         name: String,
@@ -812,11 +850,10 @@ class MainActivity : ComponentActivity() {
         // 即它是**本期活动**口径、不是账号历史总积分。所以必须写明「本期」——
         // 笼统写「累计」会像社区脚本那样，让人误以为这是账号的总资产。
         data.intOrNull("total_credits")?.let { extra.add("本期累计 $it 积分") }
-        data.boolOrNull("is_streak_day")
-            ?.let { extra.add(if (it) "今天是连签奖励日" else "今天非连签奖励日") }
-        // 实测本期活动返回 0，语义是「本期没有下一档奖励日」而不是「第 0 天」，故只在 > 0 时提示
-        data.intOrNull("next_streak_day")?.takeIf { it > 0 }
-            ?.let { extra.add("下次奖励在第 $it 天") }
+        // 连签奖励日字段（is_streak_day / next_streak_day）已删除（2026-09-18 用户决定）：
+        // season 9 实测整期没配奖励日（is_streak_day=false / next_streak_day=0 /
+        // streak_bonus_*=0），「连签有奖励」的印象其实来自成长中心的连续**登录**档位，
+        // 与加油站签到无关。字段有才显示的读法救不了「整期都没有」的字段，留着只占文案。
         if (extra.isNotEmpty()) sb.append("\n    ").append(extra.joinToString(" · "))
 
         return sb.toString()

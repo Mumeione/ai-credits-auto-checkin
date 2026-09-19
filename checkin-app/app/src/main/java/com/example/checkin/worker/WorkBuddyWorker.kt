@@ -57,7 +57,6 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         DailySchedule.scheduleNext(applicationContext, DailySchedule.WORK_WB, WorkBuddyWorker::class.java)
-        val quiet = inputData.getBoolean(DailySchedule.KEY_QUIET, false)
         // 手动签到：每个账号的结果当场通知，失败不进退避（用户点了就是要立刻看到结果）
         val manual = inputData.getBoolean(DailySchedule.KEY_MANUAL, false)
         // 重试链当前轮次（链首任务由排程器写入 1；重试轮由 enqueueRetry 递增）
@@ -89,8 +88,11 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
         val finalAttempt = !retryable || attempt >= DailySchedule.MAX_RUN_ATTEMPTS
 
         attempts.forEach { (acc, res) ->
+            // 成功一律通知（2026-09-18 用户反馈「自动签到成功没显示通知」后移除静默压制）：
+            // 补签一天最多一次（见 alreadyHandled），「今日已签到」类通知不会刷屏，
+            // 反而是用户确认「定时任务真的跑了」的唯一信号。
             when {
-                res.outcome == CheckinOutcome.OK && !(quiet && res.alreadyDone) ->
+                res.outcome == CheckinOutcome.OK ->
                     Notifier.notify(applicationContext, "${res.title} · ${acc.name}", res.message)
 
                 // 定时签到：失败只在「不再重试」时报；手动签到：失败也当场报
@@ -105,7 +107,7 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
             retryable && !finalAttempt && !manual -> {
                 DailySchedule.enqueueRetry(
                     applicationContext, DailySchedule.WORK_WB, WorkBuddyWorker::class.java,
-                    chainId, attempt + 1, quiet,
+                    chainId, attempt + 1,
                 )
                 Result.failure()
             }
@@ -161,7 +163,6 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
                         CheckinOutcome.OK,
                         "WorkBuddy 今日已签到",
                         creditText(credit),
-                        alreadyDone = true,
                     )
                 }
             } else if (statusCode == ALREADY_CODE) {
@@ -169,7 +170,6 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
                     CheckinOutcome.OK,
                     "WorkBuddy 今日已签到",
                     creditText(0),
-                    alreadyDone = true,
                 )
             }
 
@@ -214,7 +214,6 @@ class WorkBuddyWorker(context: Context, params: WorkerParameters) :
                         CheckinOutcome.OK,
                         "WorkBuddy 今日已签到",
                         creditText(creditOf(claimJson)),
-                        alreadyDone = true,
                     )
                 }
 

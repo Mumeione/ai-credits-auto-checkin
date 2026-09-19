@@ -56,9 +56,6 @@ object DailySchedule {
     const val WORK_TRAE = "trae"
     const val WORK_WB = "workbuddy"
 
-    /** 兜底补签标记：静默模式下「今天本来就已签到」不再弹通知，避免每次开 App 都刷一条。 */
-    const val KEY_QUIET = "quiet"
-
     /** 手动签到标记：App 内按钮触发，每个账号的结果当场通知，失败不进入退避重试。 */
     const val KEY_MANUAL = "manual"
 
@@ -122,7 +119,6 @@ object DailySchedule {
             uniqueName(kind, target.toLocalDate()),
             worker,
             Duration.between(now, target).toMillis(),
-            quiet = false,
             chainId = target.toLocalDate().toString(),
         )
 
@@ -140,7 +136,6 @@ object DailySchedule {
                 "${todayName}_catchup",
                 worker,
                 0L,
-                quiet = true,
                 chainId = today.toString(),
             )
         }
@@ -197,7 +192,6 @@ object DailySchedule {
             uniqueName(kind, target.toLocalDate()),
             worker,
             Duration.between(now, target).toMillis(),
-            quiet = false,
             chainId = target.toLocalDate().toString(),
         )
     }
@@ -219,14 +213,12 @@ object DailySchedule {
         worker: Class<out ListenableWorker>,
         chainId: String,
         nextAttempt: Int,
-        quiet: Boolean,
     ) {
         val request = OneTimeWorkRequest.Builder(worker)
             .setConstraints(constraints())
             .setInitialDelay(RETRY_DELAY_MINUTES, TimeUnit.MINUTES)
             .setInputData(
                 Data.Builder()
-                    .putBoolean(KEY_QUIET, quiet)
                     .putString(KEY_CHAIN, chainId)
                     .putInt(KEY_ATTEMPT, nextAttempt)
                     .build()
@@ -253,7 +245,6 @@ object DailySchedule {
         name: String,
         worker: Class<out ListenableWorker>,
         delayMillis: Long,
-        quiet: Boolean,
         chainId: String,
     ) {
         val request = OneTimeWorkRequest.Builder(worker)
@@ -261,7 +252,6 @@ object DailySchedule {
             .setInitialDelay(delayMillis.coerceAtLeast(0L), TimeUnit.MILLISECONDS)
             .setInputData(
                 Data.Builder()
-                    .putBoolean(KEY_QUIET, quiet)
                     .putString(KEY_CHAIN, chainId)
                     .putInt(KEY_ATTEMPT, 1)
                     .build()

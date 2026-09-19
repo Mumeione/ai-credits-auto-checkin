@@ -45,7 +45,6 @@ class TraeWorker(context: Context, params: WorkerParameters) :
     override suspend fun doWork(): Result {
         // 先把明天的排程落地，即使本次超时/崩溃也不会断链
         DailySchedule.scheduleNext(applicationContext, DailySchedule.WORK_TRAE, TraeWorker::class.java)
-        val quiet = inputData.getBoolean(DailySchedule.KEY_QUIET, false)
         // 手动签到：每个账号的结果当场通知，失败不进退避（用户点了就是要立刻看到结果）
         val manual = inputData.getBoolean(DailySchedule.KEY_MANUAL, false)
         // 重试链当前轮次（链首任务由排程器写入 1；重试轮由 enqueueRetry 递增）
@@ -73,8 +72,11 @@ class TraeWorker(context: Context, params: WorkerParameters) :
         val finalAttempt = !retryable || attempt >= DailySchedule.MAX_RUN_ATTEMPTS
 
         attempts.forEach { (acc, res) ->
+            // 成功一律通知（2026-09-18 用户反馈「自动签到成功没显示通知」后移除静默压制）：
+            // 补签一天最多一次（见 alreadyHandled），「今日已签到」类通知不会刷屏，
+            // 反而是用户确认「定时任务真的跑了」的唯一信号。
             when {
-                res.outcome == CheckinOutcome.OK && !(quiet && res.alreadyDone) ->
+                res.outcome == CheckinOutcome.OK ->
                     Notifier.notify(applicationContext, "${res.title} · ${acc.name}", res.message)
 
                 // 定时签到：失败只在「不再重试」时报，避免重试期间反复打扰；
@@ -91,7 +93,7 @@ class TraeWorker(context: Context, params: WorkerParameters) :
             retryable && !finalAttempt && !manual -> {
                 DailySchedule.enqueueRetry(
                     applicationContext, DailySchedule.WORK_TRAE, TraeWorker::class.java,
-                    chainId, attempt + 1, quiet,
+                    chainId, attempt + 1,
                 )
                 Result.failure()
             }
@@ -158,12 +160,11 @@ class TraeWorker(context: Context, params: WorkerParameters) :
                 CheckinOutcome.OK,
                 "Trae 今日已签到",
                 "今日 +$credits 积分$usageText",
-                alreadyDone = true,
             )
         }
 
         // 服务端明确未开放签到（enable=false）时，继续 claim 只会白烧限流额度；
-        // 但「今天没签成」必须让用户知道，不标 alreadyDone，照常通知
+        // 但「今天没签成」必须让用户知道，照常通知
         if (!json.optBoolean("enable", true)) {
             return current to Attempt(
                 CheckinOutcome.OK, "Trae 签到", "该账号未开放签到（enable=false），今日跳过",
@@ -182,7 +183,7 @@ class TraeWorker(context: Context, params: WorkerParameters) :
             )
 
             is TraeClaim.Already -> current to Attempt(
-                CheckinOutcome.OK, "Trae 今日已签到", claim.message, alreadyDone = true
+                CheckinOutcome.OK, "Trae 今日已签到", claim.message
             )
 
             is TraeClaim.Busy -> current to Attempt(

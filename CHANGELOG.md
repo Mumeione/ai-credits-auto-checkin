@@ -2,6 +2,54 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 格式，版本号遵循语义化版本。
 
+## [1.4.2] · 2026-09-18
+
+2026-09-18 实测反馈四问题的修复版：通知可见性、状态同步、弹窗约束、字段清理。
+
+### 修复
+
+- **自动签到成功不再「静默」**
+  - 用户实测：WorkBuddy 自动签到成功却没收到任何通知。唯一代码级成因是
+    `DailySchedule.KEY_QUIET`（静默补签标记）× `Attempt.alreadyDone`（今天本来已签）的
+    组合压制——补签模式下「今日已签到」类结果不弹通知
+  - 该逻辑的历史前提是「每次开 App 都可能补跑刷屏」，但补签已收紧为一天最多一次，
+    前提不成立；而用户把「成功不通知」直接感知为「定时任务没跑」
+  - **整条静默链路删除**：`KEY_QUIET` 常量、`enqueue` / `enqueueRetry` 的 `quiet` 参数、
+    `Attempt.alreadyDone` 字段全部移除；现在**签到成功（含「今日已签到」）一律通知**
+  - 若之后仍偶发没通知，剩余可能在设备侧（通知权限被关、勿扰模式）——代码路径上
+    成功结果已无任何压制点
+- **账号卡片的签到状态与「查询积分」不同步**
+  - 根因：卡片只显示 Worker 写回的 `lastResult`，查询到的权威状态（`today_checked_in` /
+    `checked_in`）不写回，且 Worker 在后台跑完时打开中的页面不刷新
+  - 现在查询成功即把「今日已签到 / 今日未签到」写回对应账号卡片（**查询失败不覆盖**，
+    保留 Worker 写下的最近一次真实结果）；新增 `MainActivity.onResume()` 刷新账号列表；
+    查询结束后卡片与结果弹窗同一动作对齐
+  - Trae 查询分支续期换新 Token 后改以 `current` 写回，避免旧对象把新 Token 覆盖掉
+- **查询结果弹窗整窗封顶**
+  - 原先只封正文区 45% 屏高，加上标题 / 按钮 / 内边距后整窗能顶到六成屏，账号一多观感
+    就是「没约束」
+  - 改为按**弹窗整体**封顶 ≤ 55% 屏高：量出标题 / 按钮的固定占位后折算正文滚动区上限
+    （下限 120dp 兜底），内容超出就在弹窗内部滚动
+
+### 变更
+
+- **删除连签奖励日字段**（`is_streak_day` / `next_streak_day` 的展示与
+  `WbFields.boolOrNull`）
+  - 2026-09-18 只读实测 season 9（「高校新生攻略」第 3 天）：`is_streak_day=false`、
+    `next_streak_day=0`、`streak_bonus_days/credit=0` ——**本期压根没配连签奖励日**，
+    签到只按每日 100 积分发（`total_credits` 300 = 3 天 × 100 吻合）
+  - 「连签有奖励」的印象来自成长中心的 7/14/28 档位，而那是**连续登录 PC 端**的奖励
+    （2026-09-17 已定性），与加油站签到无关；留着一整期都不出现的字段只占文案
+  - 若后续赛季配了奖励日，属新增字段，届时按「有才显示」重新接入
+
+### 实测记录
+
+- `POST /v2/billing/meter/checkin-activity-status`（只读）season 9 第 3 天：
+  `streak_days=3`、`checkin_dates=[09-18,09-17,09-16]`、`week_progress=[F,F,T,T,T,F,F]`、
+  `today_checked_in=true`——当天 WorkBuddy 自动签到确已成功，与用户观察一致
+
+- `versionCode` 6 → 7、`versionName` → 1.4.2（v1.4.1 的包已装机，必须递增才装得上）
+
 ## [1.4.1] · 2026-09-17
 
 修正 1.4.0 当天引入的一处**口径错误**：把成长中心的「连续登录」当成了「连续签到」。
@@ -456,7 +504,8 @@
 - WorkManager 每日定时（1 天周期 + 30 分钟弹性窗口，网络连通 + 电量不低约束），无常驻后台
 - 电脑端提取脚本 `extract_tokens.py`：解密 Trae 凭据（AES-128-CBC + HMAC）与 WorkBuddy 明文凭据 → `checkin_auth.json`
 
-[Unreleased]: https://github.com/Mumeione/ai-credits-auto-checkin/compare/v1.4.1...HEAD
+[Unreleased]: https://github.com/Mumeione/ai-credits-auto-checkin/compare/v1.4.2...HEAD
+[1.4.2]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.4.2
 [1.4.1]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.4.1
 [1.1.1]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.1.1
 [1.0.0]: https://github.com/Mumeione/ai-credits-auto-checkin/releases/tag/v1.0.0

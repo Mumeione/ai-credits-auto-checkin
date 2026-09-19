@@ -10,12 +10,9 @@ package com.example.checkin.worker
  * @param outcome 归类结果，决定外层 WorkManager 是 success 还是 failure
  * @param title 通知标题（不含账号名，账号名由调用方拼上）
  * @param message 通知正文，同时会写回账号卡片的「最近一次结果」
- * @param alreadyDone 今天本来就已签到。静默补签（[DailySchedule.KEY_QUIET]）下这类
- *   结果不弹通知，避免每次开 App 都刷一条「今日已签到」
  */
 internal data class Attempt(
     val outcome: CheckinOutcome,
     val title: String,
     val message: String,
-    val alreadyDone: Boolean = false,
 )
